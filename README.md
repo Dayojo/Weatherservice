@@ -1,253 +1,303 @@
+# AWS EKS Cluster with Jenkins CI/CD and Weather Microservice
 
-# Weather Service Infrastructure Project
-
-This project implements a complete weather service infrastructure using Terraform, Kops, Jenkins, and a Python microservice.
-
-## Infrastructure Components and Resources
-
-Before implementation, here are the components we'll be using:
-
-### 1. AWS Resources
-- [AWS Provider](https://registry.terraform.io/providers/hashicorp/aws/latest)
-- [S3 Bucket](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket) - For Kops state store
-- [VPC Module](https://registry.terraform.io/modules/terraform-aws-modules/vpc/aws/latest) - For networking
-- [IAM Role](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) - For Kops permissions
-- [Security Group](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) - For cluster access
-
-### 2. Kubernetes Resources
-- Jenkins Deployment
-- Weather Service Deployment
-- Load Balancer Services
-- RBAC Configurations
+This project sets up a complete infrastructure on AWS including:
+- EKS (Kubernetes) Cluster
+- Jenkins CI/CD installation on Kubernetes
+- Weather microservice with CI/CD pipeline
 
 ## Prerequisites
 
-1. AWS CLI installed and configured
-```bash
-aws configure
-# Enter your AWS credentials when prompted
-```
-
-2. Required tools:
-```bash
-# Install Terraform
-brew install terraform
-
-# Install Kops
-brew install kops
-
-# Install kubectl
-brew install kubectl
-
-# Install jq (for JSON processing)
-brew install jq
-```
+- AWS CLI installed and configured
+- Terraform installed
+- kubectl installed
+- Git installed
 
 ## Project Structure
+
 ```
-weather-service-project/
+.
 ├── terraform/
-│   ├── main.tf          # Main infrastructure configuration
-│   ├── variables.tf     # Variable definitions
-│   ├── outputs.tf       # Output definitions
-│   └── providers.tf     # Provider configurations
+│   ├── main.tf           # Main Terraform configuration
+│   ├── variables.tf      # Variable definitions
+│   ├── providers.tf      # Provider configurations
+│   └── outputs.tf        # Output definitions
 ├── kubernetes/
-│   ├── jenkins.yaml     # Jenkins deployment manifest
-│   └── weather-service.yaml # Weather service manifest
+│   ├── jenkins.yaml      # Jenkins Kubernetes deployment
+│   └── weather-service.yaml  # Weather service deployment
 ├── microservice/
-│   ├── app.py          # Weather service application
-│   ├── requirements.txt # Python dependencies
-│   ├── Dockerfile      # Container configuration
-│   └── Jenkinsfile     # CI/CD pipeline
-└── deploy.sh           # Main deployment script
+│   ├── app.py           # Weather service application
+│   ├── requirements.txt  # Python dependencies
+│   ├── Dockerfile       # Container image definition
+│   └── Jenkinsfile      # CI/CD pipeline definition
+└── deploy.sh            # Main deployment script
 ```
 
-## Step-by-Step Deployment Guide
+## Step 1: AWS EKS Cluster Setup
 
-### 1. Clone the Repository
-```bash
-git clone <repository-url>
-cd weather-service-project
-```
+### VPC and Networking Setup
 
-### 2. Initialize Terraform
-```bash
-cd terraform
-terraform init
-```
-Expected output:
-```
-Initializing the backend...
-Initializing provider plugins...
-- Finding hashicorp/aws versions matching "~> 5.0"...
-- Installing hashicorp/aws v5.x.x...
-Terraform has been successfully initialized!
-```
+First, we'll create a VPC for our EKS cluster.
 
-### 3. Create Base Infrastructure
-```bash
-terraform apply
-```
-Expected output:
-```
-Apply complete! Resources: 10 added, 0 changed, 0 destroyed.
+**Reference**: [AWS VPC Module](https://registry.terraform.io/modules/terraform-aws-modules/vpc/aws/latest)
 
-Outputs:
-kops_state_store = "s3://kops-state-store-xxxxx"
-cluster_name = "weather.k8s.local"
-vpc_id = "vpc-xxxxxxxxxxxxxxxxx"
-```
+```hcl
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "5.0.0"
 
-### 4. Create Kubernetes Cluster
-```bash
-export KOPS_STATE_STORE=s3://kops-state-store-xxxxx
-kops create cluster \
-    --name=weather.k8s.local \
-    --cloud=aws \
-    --zones=us-east-1a,us-east-1b \
-    --node-count=2 \
-    --node-size=t3.medium \
-    --kubernetes-version=1.27.0 \
-    --yes
-```
-Expected output:
-```
-Creating cluster & instancegroup ...
-Cluster is starting. It should be ready in a few minutes.
-```
+  name = "eks-vpc"
+  cidr = "10.0.0.0/16"
 
-### 5. Validate Cluster
-```bash
-kops validate cluster --wait 10m
-```
-Expected output:
-```
-Your cluster weather.k8s.local is ready
-```
+  azs             = ["us-east-1a", "us-east-1b"]
+  private_subnets = ["10.0.1.0/24", "10.0.2.0/24"]
+  public_subnets  = ["10.0.101.0/24", "10.0.102.0/24"]
 
-### 6. Deploy Jenkins
-```bash
-kubectl apply -f kubernetes/jenkins.yaml
-```
-Expected output:
-```
-namespace/jenkins created
-serviceaccount/jenkins created
-deployment.apps/jenkins created
-service/jenkins created
-```
+  enable_nat_gateway = true
+  single_nat_gateway = true
 
-### 7. Get Jenkins Credentials
-```bash
-# Get Jenkins admin password
-JENKINS_POD=$(kubectl get pods -n jenkins -l app=jenkins -o jsonpath="{.items[0].metadata.name}")
-kubectl exec -n jenkins $JENKINS_POD -- cat /var/jenkins_home/secrets/initialAdminPassword
-```
-Expected output:
-```
-2b8e19e0abc84b84a8c2b8784a8c2b87
-```
+  tags = {
+    "kubernetes.io/cluster/weather-eks-cluster" = "shared"
+  }
 
-### 8. Deploy Weather Service
-```bash
-# Build and deploy
-cd microservice
-docker build -t weather-service:latest .
-kubectl apply -f ../kubernetes/weather-service.yaml
-```
-Expected output:
-```
-namespace/weather-service created
-deployment.apps/weather-service created
-service/weather-service created
-```
+  public_subnet_tags = {
+    "kubernetes.io/cluster/weather-eks-cluster" = "shared"
+    "kubernetes.io/role/elb"                    = "1"
+  }
 
-### 9. Access Services
-
-Get service URLs:
-```bash
-# Jenkins URL
-kubectl get svc -n jenkins jenkins -o jsonpath="{.status.loadBalancer.ingress[0].hostname}"
-
-# Weather Service URL
-kubectl get svc -n weather-service weather-service -o jsonpath="{.status.loadBalancer.ingress[0].hostname}"
-```
-
-Test weather service:
-```bash
-curl http://<weather-service-url>/weather/London
-```
-Expected output:
-```json
-{
-  "city": "London",
-  "coordinates": {
-    "latitude": 51.5074,
-    "longitude": -0.1278
-  },
-  "weather": {
-    "temperature": 18.2,
-    "windspeed": 15.5,
-    "winddirection": 180,
-    "weathercode": 1,
-    "time": "2023-11-09T12:00"
+  private_subnet_tags = {
+    "kubernetes.io/cluster/weather-eks-cluster" = "shared"
+    "kubernetes.io/role/internal-elb"           = "1"
   }
 }
 ```
 
-## Automated Deployment
+### EKS Cluster Setup
 
-To deploy everything automatically:
+**Reference**: [AWS EKS Module](https://registry.terraform.io/modules/terraform-aws-modules/eks/aws/latest)
+
+```hcl
+module "eks" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = "19.15.3"
+
+  cluster_name    = "weather-eks-cluster"
+  cluster_version = "1.27"
+
+  vpc_id                         = module.vpc.vpc_id
+  subnet_ids                     = module.vpc.private_subnets
+  cluster_endpoint_public_access = true
+
+  eks_managed_node_group_defaults = {
+    ami_type = "AL2_x86_64"
+  }
+
+  eks_managed_node_groups = {
+    general = {
+      desired_size = 2
+      min_size     = 1
+      max_size     = 3
+
+      instance_types = ["t3.medium"]
+      capacity_type  = "ON_DEMAND"
+    }
+  }
+
+  tags = {
+    Environment = "dev"
+    Project     = "WeatherService"
+  }
+}
+```
+
+## Step 2: Jenkins Installation on Kubernetes
+
+The Jenkins deployment will be configured using Kubernetes manifests to run in the EKS cluster.
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jenkins
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jenkins
+  namespace: jenkins
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jenkins
+  template:
+    metadata:
+      labels:
+        app: jenkins
+    spec:
+      containers:
+      - name: jenkins
+        image: jenkins/jenkins:lts
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+        - name: jenkins-home
+          mountPath: /var/jenkins_home
+      volumes:
+      - name: jenkins-home
+        emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jenkins
+  namespace: jenkins
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 8080
+  selector:
+    app: jenkins
+```
+
+## Step 3: Weather Microservice
+
+### Python Application (app.py)
+
+```python
+from flask import Flask, request, jsonify
+import requests
+
+app = Flask(__name__)
+
+@app.route('/weather', methods=['GET'])
+def get_weather():
+    lat = request.args.get('lat', '40.7128')  # Default to New York
+    lon = request.args.get('lon', '-74.0060')
+    
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
+    response = requests.get(url)
+    
+    if response.status_code == 200:
+        return jsonify(response.json())
+    else:
+        return jsonify({"error": "Failed to fetch weather data"}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+```
+
+### Dockerfile
+
+```dockerfile
+FROM python:3.9-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY app.py .
+
+EXPOSE 5000
+CMD ["python", "app.py"]
+```
+
+### Jenkinsfile
+
+```groovy
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_IMAGE = 'weather-service'
+        DOCKER_TAG = "${BUILD_NUMBER}"
+    }
+    
+    stages {
+        stage('Build') {
+            steps {
+                sh 'docker build -t $DOCKER_IMAGE:$DOCKER_TAG .'
+            }
+        }
+        
+        stage('Deploy') {
+            steps {
+                sh '''
+                    kubectl apply -f kubernetes/weather-service.yaml
+                    kubectl set image deployment/weather-service weather-service=$DOCKER_IMAGE:$DOCKER_TAG
+                '''
+            }
+        }
+    }
+}
+```
+
+## Deployment Script (deploy.sh)
+
+```bash
+#!/bin/bash
+
+# Initialize and apply Terraform
+cd terraform
+terraform init
+terraform apply -auto-approve
+
+# Configure kubectl
+aws eks update-kubeconfig --name weather-eks-cluster --region us-east-1
+
+# Install Jenkins
+kubectl apply -f ../kubernetes/jenkins.yaml
+
+# Wait for Jenkins to be ready
+echo "Waiting for Jenkins to be ready..."
+kubectl wait --namespace jenkins \
+  --for=condition=ready pod \
+  --selector=app=jenkins \
+  --timeout=300s
+
+# Get Jenkins admin password
+echo "Jenkins initial admin password:"
+kubectl exec -n jenkins $(kubectl get pods -n jenkins -l app=jenkins -o jsonpath='{.items[0].metadata.name}') -- cat /var/jenkins_home/secrets/initialAdminPassword
+
+# Deploy weather service
+kubectl apply -f ../kubernetes/weather-service.yaml
+
+echo "Deployment complete!"
+```
+
+## Usage
+
+1. Clone this repository
+2. Run the deployment script:
 ```bash
 chmod +x deploy.sh
 ./deploy.sh
 ```
 
-The script will:
-1. Create infrastructure using Terraform
-2. Set up Kubernetes cluster using Kops
-3. Deploy Jenkins
-4. Deploy the weather service
-5. Display all necessary URLs and credentials
+3. Access Jenkins:
+   - Get the Jenkins URL from:
+   ```bash
+   kubectl get svc -n jenkins jenkins
+   ```
+   - Use the initial admin password printed during deployment
 
-## Clean Up
+4. Access the Weather Service:
+   ```bash
+   kubectl get svc weather-service
+   ```
+   Example API call:
+   ```bash
+   curl "http://<WEATHER_SERVICE_URL>/weather?lat=40.7128&lon=-74.0060"
+   ```
 
-To delete all resources:
+## Important Notes
 
-```bash
-# 1. Delete Kubernetes resources
-kubectl delete -f kubernetes/weather-service.yaml
-kubectl delete -f kubernetes/jenkins.yaml
-
-# 2. Delete the cluster
-kops delete cluster --name weather.k8s.local --yes
-
-# 3. Destroy Terraform resources
-cd terraform && terraform destroy -auto-approve
-```
-
-## Troubleshooting
-
-1. If cluster validation fails:
-```bash
-kops validate cluster
-```
-
-2. Check pod status:
-```bash
-kubectl get pods --all-namespaces
-```
-
-3. View service logs:
-```bash
-kubectl logs -n weather-service deployment/weather-service
-```
-
-## Screenshots
-
-[Screenshots of the deployed services will be added here after deployment]
-
-## Notes
-- The LoadBalancer URLs might take a few minutes to become available
-- Jenkins initial setup requires the admin password shown in the output
-- The weather service automatically scales between 2-5 replicas based on load
+- All resources are created in the us-east-1 region
+- The EKS cluster uses t3.medium instances for cost-effectiveness
+- Jenkins is exposed via a LoadBalancer service
+- The weather service uses the free Open-Meteo API
+- Remember to destroy resources when done:
+  ```bash
+  cd terraform
+  terraform destroy -auto-approve
